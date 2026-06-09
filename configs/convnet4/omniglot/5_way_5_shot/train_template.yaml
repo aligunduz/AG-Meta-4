@@ -48,5 +48,4 @@ optimizer_args:
   milestones:
     - 120
     - 140
-log_alignment: true
 epoch: 100

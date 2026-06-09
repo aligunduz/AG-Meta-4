@@ -39,21 +39,5 @@ optimizer_args:
   lr: 0.001
 
 
-log_alignment: false
-use_alignment_pre_loss: false
-use_alignment_post_loss: false
-alignment_pre_weight: 0.1
-alignment_post_weight: 0.1
 use_gradient_transport: true
-gradient_transport_mode: prototype_conditioned_gate
-task_gate_signal: proto_separability
-task_gate_detach_signal: true
-task_gate_residual_scale: 0.1
-task_gate_gamma_scale: 1.0
-task_gate_gamma_l2_weight: 0.001
-task_gate_proto_metric: log_ratio
-task_gate_proto_temperature: 1.0
-task_gate_proto_intra_floor: 0.5
-task_gate_proto_normalize_features: true
-task_gate_collect_stats: true
 epoch: 200

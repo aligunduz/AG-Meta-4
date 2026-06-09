@@ -159,8 +159,7 @@ python train.py \
 ```
 
 By default, W&B logs scalar metrics such as train/validation loss, accuracy,
-learning rate, elapsed time, gradient transport gates, task-gate stats, and
-alignment metrics when those features are enabled.
+learning rate, elapsed time, and scalar gradient transport gates when enabled.
 
 Checkpoint upload is disabled by default to avoid using W&B storage quickly.
 If you want to upload the final `epoch-last.pth`, `max-va.pth`, `config.yaml`,

@@ -13,7 +13,6 @@ from torch.utils.data import DataLoader
 import datasets
 import models
 import utils
-import utils.optimizers as optimizers
 
 
 class WandbLogger(object):
@@ -114,12 +113,9 @@ def make_test_run_name(config, ckpt_config):
   test_cfg = config.get('test') or {}
   n_way = test_cfg.get('n_way', 'way')
   n_shot = test_cfg.get('n_shot', 'shot')
-  mode = config.get(
-    'gradient_transport_mode',
-    ckpt_config.get('gradient_transport_mode', 'scalar'))
   ckpt_name = os.path.splitext(os.path.basename(config.get('load', 'ckpt')))[0]
-  return '{}_{}_way_{}_shot_{}_{}_test'.format(
-    dataset.replace('meta-', ''), n_way, n_shot, mode, ckpt_name)
+  return '{}_{}_way_{}_shot_{}_test'.format(
+    dataset.replace('meta-', ''), n_way, n_shot, ckpt_name)
 
 
 def main(config):
@@ -127,18 +123,15 @@ def main(config):
   np.random.seed(0)
   torch.manual_seed(0)
   torch.cuda.manual_seed(0)
-  # torch.backends.cudnn.deterministic = True
-  # torch.backends.cudnn.benchmark = False
   torch.backends.cudnn.benchmark = True
-  ##### Dataset #####
 
   dataset = datasets.make(config['dataset'], **config['test'])
   utils.log('meta-test set: {} (x{}), {}'.format(
     dataset[0][0].shape, len(dataset), dataset.n_classes))
-  loader = DataLoader(dataset, config['test']['n_episode'],
-    collate_fn=datasets.collate_fn, num_workers=8, pin_memory=True,prefetch_factor=4,persistent_workers=True)
-
-  ##### Model #####
+  loader = DataLoader(
+    dataset, config['test']['n_episode'],
+    collate_fn=datasets.collate_fn, num_workers=8, pin_memory=True,
+    prefetch_factor=4, persistent_workers=True)
 
   ckpt = torch.load(config['load'])
   inner_args = utils.config_inner_args(config.get('inner_args'))
@@ -149,9 +142,6 @@ def main(config):
   use_gradient_transport = config.get(
     'use_gradient_transport',
     ckpt_config.get('use_gradient_transport', False))
-  task_gate_config = dict(ckpt_config)
-  task_gate_config.update(config)
-  task_gate_args = utils.config_task_gate_args(task_gate_config)
   model = models.load(ckpt, load_clf=(not inner_args['reset_classifier']))
   ckpt_training = ckpt.get('training', {})
 
@@ -164,36 +154,23 @@ def main(config):
   utils.log('num params: {}'.format(utils.compute_n_params(model)))
   utils.log('gradient transport: {}'.format(
     'enabled' if use_gradient_transport else 'disabled'))
-  utils.log('task-conditioned gate: {}'.format(
-    task_gate_args if task_gate_args.get('enabled', False) else 'disabled'))
   if 'epoch' in ckpt_training:
     wandb_logger.set_summary('checkpoint/epoch', ckpt_training['epoch'])
   if 'max_va' in ckpt_training:
-    wandb_logger.set_summary('checkpoint/max_val_accuracy',
-                             ckpt_training['max_va'])
-  wandb_logger.set_summary('gradient_transport/enabled',
-                           int(bool(use_gradient_transport)))
-  wandb_logger.set_summary('gradient_transport/mode', task_gate_args.get(
-    'mode', config.get('gradient_transport_mode', 'scalar')))
+    wandb_logger.set_summary(
+      'checkpoint/max_val_accuracy', ckpt_training['max_va'])
   wandb_logger.set_summary(
-    'task_gate/signal',
-    task_gate_args.get('signal') if task_gate_args.get('enabled', False)
-    else 'disabled')
+    'gradient_transport/enabled', int(bool(use_gradient_transport)))
   if use_gradient_transport:
     if 'gradient_transport_state_dict' not in ckpt:
-      utils.log('warning: checkpoint has no gradient transport gates; using initialized gate values')
+      utils.log(
+        'warning: checkpoint has no gradient transport gates; '
+        'using initialized gate values')
     model_for_log = model.module if config.get('_parallel') else model
     gates = model_for_log.get_gradient_transport_gates()
     if len(gates) > 0:
       gate_mean = sum(gates.values()) / len(gates)
       utils.log('gradient transport gate_mean: {:.4f}'.format(gate_mean))
-    if task_gate_args.get('enabled', False):
-      gammas = model_for_log.get_task_gate_gammas()
-      if len(gammas) > 0:
-        gamma_abs_mean = sum(abs(v) for v in gammas.values()) / len(gammas)
-        utils.log('task gate gamma_abs_mean: {:.4f}'.format(gamma_abs_mean))
-
-  ##### Evaluation #####
 
   model.eval()
   aves_va = utils.AverageMeter()
@@ -208,40 +185,31 @@ def main(config):
       x_query = x_query.cuda(non_blocking=True)
       y_query = y_query.cuda(non_blocking=True)
 
-
       if inner_args['reset_classifier']:
         if config.get('_parallel'):
           model.module.reset_classifier()
         else:
           model.reset_classifier()
 
-      with amp.autocast('cuda'):  # NEW
-          logits = model(
-            x_shot,
-            x_query,
-            y_shot,
-            inner_args,
-            meta_train=False,
-            use_gradient_transport=use_gradient_transport,
-            task_gate_args=task_gate_args)
-          logits = logits.view(-1, config['test']['n_way'])
-          labels = y_query.view(-1)
+      with amp.autocast('cuda'):
+        logits = model(
+          x_shot,
+          x_query,
+          y_shot,
+          inner_args,
+          meta_train=False,
+          use_gradient_transport=use_gradient_transport)
+        logits = logits.view(-1, config['test']['n_way'])
+        labels = y_query.view(-1)
 
-          pred = torch.argmax(logits, dim=1)
-          acc = utils.compute_acc(pred, labels)
-      # logits = model(
-      #   x_shot, x_query, y_shot, inner_args, meta_train=False,
-      #   use_gradient_transport=use_gradient_transport)
-      # logits = logits.view(-1, config['test']['n_way'])
-      # labels = y_query.view(-1)
-      #
-      # pred = torch.argmax(logits, dim=1)
-      # acc = utils.compute_acc(pred, labels)
+        pred = torch.argmax(logits, dim=1)
+        acc = utils.compute_acc(pred, labels)
+
       aves_va.update(acc, 1)
       va_lst.append(acc)
 
     print('test epoch {}: acc={:.2f} +- {:.2f} (%)'.format(
-      epoch, aves_va.item() * 100, 
+      epoch, aves_va.item() * 100,
       utils.mean_confidence_interval(va_lst) * 100))
     ci95 = float(utils.mean_confidence_interval(va_lst))
     acc_mean = float(aves_va.item())
@@ -264,7 +232,6 @@ def main(config):
       'test/n_episode': config['test']['n_episode'],
       'test/n_batch': config['test'].get('n_batch'),
       'gradient_transport/enabled': int(bool(use_gradient_transport)),
-      'task_gate/enabled': int(bool(task_gate_args.get('enabled', False))),
     }, step=epoch)
 
   final_ci95 = float(utils.mean_confidence_interval(va_lst))
@@ -302,12 +269,12 @@ def main(config):
 
 if __name__ == '__main__':
   parser = argparse.ArgumentParser()
-  parser.add_argument('--config', 
+  parser.add_argument('--config',
                       help='configuration file')
-  parser.add_argument('--gpu', 
-                      help='gpu device number', 
+  parser.add_argument('--gpu',
+                      help='gpu device number',
                       type=str, default='0')
-  parser.add_argument('--efficient', 
+  parser.add_argument('--efficient',
                       help='if True, enables gradient checkpointing',
                       action='store_true')
   parser.add_argument('--wandb',
@@ -334,15 +301,10 @@ if __name__ == '__main__':
                       type=str, default=None)
   args = parser.parse_args()
   config = yaml.load(open(args.config, 'r'), Loader=yaml.FullLoader)
-  
+
   if len(args.gpu.split(',')) > 1:
     config['_parallel'] = True
     config['_gpu'] = args.gpu
 
   utils.set_gpu(args.gpu)
-  # ✅ GPU varsa kullan, yoksa CPU'da devam et
-  if torch.cuda.is_available() and args.gpu != '-1':
-      utils.set_gpu(args.gpu)
-  else:
-      print("⚠️ CUDA not available — running on CPU mode.")
   main(config)
