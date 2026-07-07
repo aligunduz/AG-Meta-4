@@ -34,7 +34,7 @@ class WandbLogger(object):
         'Install it with: pip install wandb') from exc
 
     self._wandb = wandb
-    project = args.wandb_project or wandb_config.get('project') or 'ag-meta-2'
+    project = args.wandb_project or wandb_config.get('project') or 'ag-meta-4'
     entity = args.wandb_entity or wandb_config.get('entity')
     mode = args.wandb_mode or wandb_config.get('mode') or 'online'
     notes = args.wandb_notes or wandb_config.get('notes')
@@ -167,7 +167,8 @@ def main(config):
         'warning: checkpoint has no gradient transport gates; '
         'using initialized gate values')
     model_for_log = model.module if config.get('_parallel') else model
-    gates = model_for_log.get_gradient_transport_gates()
+    gates = model_for_log.get_gradient_transport_gates(
+      frozen=inner_args['frozen'])
     if len(gates) > 0:
       gate_mean = sum(gates.values()) / len(gates)
       utils.log('gradient transport gate_mean: {:.4f}'.format(gate_mean))

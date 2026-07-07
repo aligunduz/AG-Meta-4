@@ -1,5 +1,4 @@
 dataset: meta-mini-imagenet
-data_root: "C:/Users/aligunduz/PycharmProjects/PyTorch-MAML/data/miniImageNet/"
 test:
   split: meta-test
   image_size: 84

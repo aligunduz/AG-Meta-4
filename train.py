@@ -56,7 +56,7 @@ class WandbLogger(object):
         'Install it with: pip install wandb') from exc
 
     self._wandb = wandb
-    project = args.wandb_project or wandb_config.get('project') or 'ag-meta-2'
+    project = args.wandb_project or wandb_config.get('project') or 'ag-meta-4'
     entity = args.wandb_entity or wandb_config.get('entity')
     mode = args.wandb_mode or wandb_config.get('mode') or 'online'
     notes = args.wandb_notes or wandb_config.get('notes')
@@ -320,15 +320,17 @@ def main(config):
     }
     if use_gradient_transport:
       model_for_log = model.module if config.get('_parallel') else model
-      gates = model_for_log.get_gradient_transport_gates()
-      gate_mean = sum(gates.values()) / len(gates)
+      gates = model_for_log.get_gradient_transport_gates(
+        frozen=inner_args['frozen'])
+      if len(gates) > 0:
+        gate_mean = sum(gates.values()) / len(gates)
 
-      writer.add_scalar('gradient_transport/gate_mean', gate_mean, epoch)
-      wandb_metrics['gradient_transport/gate_mean'] = gate_mean
+        writer.add_scalar('gradient_transport/gate_mean', gate_mean, epoch)
+        wandb_metrics['gradient_transport/gate_mean'] = gate_mean
 
-      for gate_name, gate_value in gates.items():
-        writer.add_scalar(f'gradient_transport/{gate_name}', gate_value, epoch)
-        wandb_metrics[f'gradient_transport/{gate_name}'] = gate_value
+        for gate_name, gate_value in gates.items():
+          writer.add_scalar(f'gradient_transport/{gate_name}', gate_value, epoch)
+          wandb_metrics[f'gradient_transport/{gate_name}'] = gate_value
 
     epoch_seconds = timer_epoch.end()
     elapsed_seconds = timer_elapsed.end()

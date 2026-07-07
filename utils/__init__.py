@@ -115,17 +115,25 @@ def mean_confidence_interval(data, confidence=0.95):
   return h
 
 
+def _default(inner_args, key, default):
+  # inner_args.get(key) or default would silently discard explicit falsy
+  # values like 0 (e.g. encoder_lr: 0, n_step: 0); only fall back to the
+  # default when the key is absent or explicitly null.
+  value = inner_args.get(key)
+  return default if value is None else value
+
+
 def config_inner_args(inner_args):
-  if inner_args is None: 
+  if inner_args is None:
     inner_args = dict()
 
-  inner_args['reset_classifier'] = inner_args.get('reset_classifier') or False
-  inner_args['n_step'] = inner_args.get('n_step') or 5
-  inner_args['encoder_lr'] = inner_args.get('encoder_lr') or 0.01
-  inner_args['classifier_lr'] = inner_args.get('classifier_lr') or 0.01
-  inner_args['momentum'] = inner_args.get('momentum') or 0.
-  inner_args['weight_decay'] = inner_args.get('weight_decay') or 0.
-  inner_args['first_order'] = inner_args.get('first_order') or False
-  inner_args['frozen'] = inner_args.get('frozen') or []
+  inner_args['reset_classifier'] = _default(inner_args, 'reset_classifier', False)
+  inner_args['n_step'] = _default(inner_args, 'n_step', 5)
+  inner_args['encoder_lr'] = _default(inner_args, 'encoder_lr', 0.01)
+  inner_args['classifier_lr'] = _default(inner_args, 'classifier_lr', 0.01)
+  inner_args['momentum'] = _default(inner_args, 'momentum', 0.)
+  inner_args['weight_decay'] = _default(inner_args, 'weight_decay', 0.)
+  inner_args['first_order'] = _default(inner_args, 'first_order', False)
+  inner_args['frozen'] = _default(inner_args, 'frozen', [])
 
   return inner_args

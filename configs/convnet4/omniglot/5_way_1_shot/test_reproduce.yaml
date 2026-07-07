@@ -1,5 +1,4 @@
 dataset: meta-omniglot
-data_root: "C:/Users/aligunduz/PycharmProjects/PyTorch-MAML/data/omniglot/"
 test:
   split: meta-test
   image_size: 84

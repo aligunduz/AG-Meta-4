@@ -68,24 +68,41 @@ class MAML(Module):
     self.encoder = encoder
     self.classifier = classifier
     self.gradient_transport_logits = nn.ParameterDict()
+    self._gradient_transport_names = {}
     device = next(self.parameters()).device
 
     for name, _ in self.encoder.named_parameters():
       key = 'encoder__' + name.replace('.', '__')
       self.gradient_transport_logits[key] = nn.Parameter(
         torch.tensor(4.0, device=device))
+      self._gradient_transport_names[key] = 'encoder.' + name
 
     for name, _ in self.classifier.named_parameters():
+      # 'temp' is never part of the inner-loop fast weights (see forward()),
+      # so a gate for it would never be applied to any gradient.
+      if name == 'temp':
+        continue
       key = 'classifier__' + name.replace('.', '__')
       self.gradient_transport_logits[key] = nn.Parameter(
         torch.tensor(4.0, device=device))
+      self._gradient_transport_names[key] = 'classifier.' + name
 
   def reset_classifier(self):
     self.classifier.reset_parameters()
 
-  def get_gradient_transport_gates(self):
+  def get_gradient_transport_gates(self, frozen=()):
+    """
+    Args:
+      frozen (list, optional): parameter-name substrings excluded from the
+        inner loop (see inner_args['frozen'] in forward()). Gates for those
+        parameters are never applied to a gradient, so they are omitted here
+        to avoid diluting logged/averaged gate statistics.
+    """
     out = {}
     for key, logit in self.gradient_transport_logits.items():
+      name = self._gradient_transport_names.get(key, key)
+      if any(s in name for s in frozen):
+        continue
       out[key] = torch.sigmoid(logit).detach().item()
     return out
 
