@@ -5,4 +5,5 @@ from . import tiered_imagenet
 from . import cifar100
 from . import cub200
 from . import inatural
+from . import meta_album
 from . import transforms
