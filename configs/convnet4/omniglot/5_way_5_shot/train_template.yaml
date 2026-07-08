@@ -48,4 +48,5 @@ optimizer_args:
   milestones:
     - 120
     - 140
+use_gradient_transport: true
 epoch: 100
