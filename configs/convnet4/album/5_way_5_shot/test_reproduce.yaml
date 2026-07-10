@@ -9,7 +9,7 @@ test:
   n_episode: 4
   n_way: 5
   n_shot: 5
-  n_query: 1
+  n_query: 5
 
 load: ./save/convnet4_album_5_way_5_shot/max-va.pth
 
@@ -22,4 +22,5 @@ inner_args:
     - bn
 
 use_gradient_transport: true
+use_amp: true
 epoch: 10

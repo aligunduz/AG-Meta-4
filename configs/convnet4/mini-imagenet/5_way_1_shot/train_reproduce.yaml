@@ -40,4 +40,5 @@ optimizer_args:
 
 
 use_gradient_transport: true
+use_amp: true
 epoch: 200

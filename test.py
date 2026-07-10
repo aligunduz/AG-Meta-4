@@ -142,6 +142,7 @@ def main(config):
   use_gradient_transport = config.get(
     'use_gradient_transport',
     ckpt_config.get('use_gradient_transport', False))
+  use_amp = config.get('use_amp', ckpt_config.get('use_amp', True))
   model = models.load(ckpt, load_clf=(not inner_args['reset_classifier']))
   ckpt_training = ckpt.get('training', {})
 
@@ -150,10 +151,12 @@ def main(config):
 
   if config.get('_parallel'):
     model = nn.DataParallel(model)
+  model_for_log = model.module if config.get('_parallel') else model
 
   utils.log('num params: {}'.format(utils.compute_n_params(model)))
   utils.log('gradient transport: {}'.format(
     'enabled' if use_gradient_transport else 'disabled'))
+  utils.log('amp (fp16): {}'.format('enabled' if use_amp else 'disabled'))
   if 'epoch' in ckpt_training:
     wandb_logger.set_summary('checkpoint/epoch', ckpt_training['epoch'])
   if 'max_va' in ckpt_training:
@@ -166,7 +169,6 @@ def main(config):
       utils.log(
         'warning: checkpoint has no gradient transport gates; '
         'using initialized gate values')
-    model_for_log = model.module if config.get('_parallel') else model
     gates = model_for_log.get_gradient_transport_gates(
       frozen=inner_args['frozen'])
     if len(gates) > 0:
@@ -192,7 +194,7 @@ def main(config):
         else:
           model.reset_classifier()
 
-      with amp.autocast('cuda'):
+      with amp.autocast('cuda', enabled=use_amp):
         logits = model(
           x_shot,
           x_query,
@@ -209,6 +211,11 @@ def main(config):
       aves_va.update(acc, 1)
       va_lst.append(acc)
 
+    nan_grad_events, nan_grad_total = model_for_log.get_nan_grad_stats()
+    nan_grad_rate = nan_grad_events / nan_grad_total if nan_grad_total > 0 else 0.
+    if nan_grad_events > 0:
+      utils.log('  nan_grad {}/{} ({:.2%})'.format(
+        nan_grad_events, nan_grad_total, nan_grad_rate))
     print('test epoch {}: acc={:.2f} +- {:.2f} (%)'.format(
       epoch, aves_va.item() * 100,
       utils.mean_confidence_interval(va_lst) * 100))
@@ -232,6 +239,8 @@ def main(config):
       'test/n_query': config['test']['n_query'],
       'test/n_episode': config['test']['n_episode'],
       'test/n_batch': config['test'].get('n_batch'),
+      'inner_loop/nan_grad_rate': nan_grad_rate,
+      'inner_loop/nan_grad_events': nan_grad_events,
       'gradient_transport/enabled': int(bool(use_gradient_transport)),
     }, step=epoch)
 

@@ -214,12 +214,14 @@ def main(config):
   if config.get('_parallel'):
     model = nn.DataParallel(model)
 
+  use_amp = config.get('use_amp', True)
   utils.log('num params: {}'.format(utils.compute_n_params(model)))
   utils.log('gradient transport: {}'.format(
     'enabled' if use_gradient_transport else 'disabled'))
+  utils.log('amp (fp16): {}'.format('enabled' if use_amp else 'disabled'))
   wandb_logger.watch(model, config)
   timer_elapsed, timer_epoch = utils.Timer(), utils.Timer()
-  scaler = amp.GradScaler('cuda')
+  scaler = amp.GradScaler('cuda', enabled=use_amp)
 
   aves_keys = ['tl', 'ta', 'vl', 'va']
   trlog = {k: [] for k in aves_keys}
@@ -246,7 +248,7 @@ def main(config):
           model.reset_classifier()
 
       optimizer.zero_grad(set_to_none=True)
-      with amp.autocast('cuda'):
+      with amp.autocast('cuda', enabled=use_amp):
         logits = model(
           x_shot,
           x_query,
@@ -287,7 +289,7 @@ def main(config):
           else:
             model.reset_classifier()
 
-        with torch.no_grad(), amp.autocast('cuda'):
+        with torch.no_grad(), amp.autocast('cuda', enabled=use_amp):
           logits = model(
             x_shot,
             x_query,
@@ -318,8 +320,8 @@ def main(config):
       'train/loss': aves['tl'],
       'train/accuracy': aves['ta'],
     }
+    model_for_log = model.module if config.get('_parallel') else model
     if use_gradient_transport:
-      model_for_log = model.module if config.get('_parallel') else model
       gates = model_for_log.get_gradient_transport_gates(
         frozen=inner_args['frozen'])
       if len(gates) > 0:
@@ -331,6 +333,13 @@ def main(config):
         for gate_name, gate_value in gates.items():
           writer.add_scalar(f'gradient_transport/{gate_name}', gate_value, epoch)
           wandb_metrics[f'gradient_transport/{gate_name}'] = gate_value
+
+    nan_grad_events, nan_grad_total = model_for_log.get_nan_grad_stats()
+    nan_grad_rate = nan_grad_events / nan_grad_total if nan_grad_total > 0 else 0.
+    writer.add_scalar('inner_loop/nan_grad_rate', nan_grad_rate, epoch)
+    writer.add_scalar('inner_loop/nan_grad_events', nan_grad_events, epoch)
+    wandb_metrics['inner_loop/nan_grad_rate'] = nan_grad_rate
+    wandb_metrics['inner_loop/nan_grad_events'] = nan_grad_events
 
     epoch_seconds = timer_epoch.end()
     elapsed_seconds = timer_elapsed.end()
@@ -348,6 +357,9 @@ def main(config):
       str(epoch), aves['tl'], aves['ta'])
     if use_gradient_transport and gate_mean is not None:
       log_str += ', gate_mean {:.4f}'.format(gate_mean)
+    if nan_grad_events > 0:
+      log_str += ', nan_grad {}/{} ({:.2%})'.format(
+        nan_grad_events, nan_grad_total, nan_grad_rate)
     writer.add_scalars('loss', {'meta-train': aves['tl']}, epoch)
     writer.add_scalars('acc', {'meta-train': aves['ta']}, epoch)
     if eval_val:

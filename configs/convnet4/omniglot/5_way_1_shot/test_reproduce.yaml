@@ -21,4 +21,5 @@ inner_args:
     - bn
 
 use_gradient_transport: false
+use_amp: true
 epoch: 10

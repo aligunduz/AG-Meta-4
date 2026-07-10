@@ -38,4 +38,5 @@ optimizer: adam
 optimizer_args:
   lr: 0.001
 
+use_amp: true
 epoch: 300

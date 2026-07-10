@@ -87,8 +87,25 @@ class MAML(Module):
         torch.tensor(4.0, device=device))
       self._gradient_transport_names[key] = 'classifier.' + name
 
+    # counts how often a raw inner-loop gradient contained a NaN/Inf value
+    # and had to be sanitized (see _inner_iter); lets callers measure how
+    # often that safety net actually fires rather than assuming it's rare.
+    self._nan_grad_events = 0
+    self._nan_grad_total = 0
+
   def reset_classifier(self):
     self.classifier.reset_parameters()
+
+  def get_nan_grad_stats(self, reset=True):
+    """
+    Returns (events, total): how many of the inner-loop parameter gradients
+    processed since the last reset contained NaN/Inf, out of how many total.
+    """
+    stats = (self._nan_grad_events, self._nan_grad_total)
+    if reset:
+      self._nan_grad_events = 0
+      self._nan_grad_total = 0
+    return stats
 
   def get_gradient_transport_gates(self, frozen=()):
     """
@@ -137,6 +154,13 @@ class MAML(Module):
         if grad is None:
           updated_param = param
         else:
+          # Guards against exploding/NaN gradients inside the inner loop
+          # (e.g. from a numerically unstable batch under transductive
+          # BatchNorm), matching the outer loop's clip_grad_value_(..., 10).
+          self._nan_grad_total += 1
+          if not torch.isfinite(grad).all():
+            self._nan_grad_events += 1
+          grad = torch.nan_to_num(grad, nan=0.0, posinf=10.0, neginf=-10.0)
           if inner_args['weight_decay'] > 0:
             grad = grad + inner_args['weight_decay'] * param
           if inner_args['momentum'] > 0:
