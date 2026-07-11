@@ -6,7 +6,33 @@ import numpy as np
 from PIL import Image
 
 
-DOMAINS = ['BRD', 'FLW', 'PLT_VIL', 'SPT', 'PLK', 'RESISC']
+#DOMAINS = ['BRD', 'FLW', 'PLT_VIL', 'SPT', 'PLK', 'RESISC']
+DOMAINS = [
+    'DOG',
+    'AWA',
+    'INS_2',
+    'INS',
+    'PLT_NET',
+    'FNG',
+    'MED_LF',
+    'PLT_DOC',
+    'BCT',
+    'PNU',
+    'PRT',
+    'RSICB',
+    'RSD',
+    'CRS',
+    'APL',
+    'BTS',
+    'TEX',
+    'TEX_DTD',
+    'TEX_ALOT',
+    'ACT_40',
+    'ACT_410',
+    'MD_MIX',
+    'MD_5_BIS',
+    'MD_6',
+]
 
 
 def convert_domain(src_dir, domain, save_dir, image_size=84):
