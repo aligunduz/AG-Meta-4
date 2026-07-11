@@ -196,6 +196,25 @@ def validate_anchors(anchor_configs):
   return [by_kind['maml'], by_kind['gt']]
 
 
+def validate_noise_floor_anchor(anchor_configs):
+  maml_anchors = [
+    anchor for anchor in anchor_configs
+    if canonical_anchor_name(anchor.get('name')) == 'maml'
+  ]
+  if len(maml_anchors) != 1:
+    raise ValueError('noise-floor mode requires exactly one MAML anchor')
+
+  maml_anchor = maml_anchors[0]
+  if not maml_anchor.get('load'):
+    raise ValueError(
+      'MAML anchor is missing load; set it in YAML or via '
+      '--maml-checkpoint')
+  if bool(maml_anchor.get('use_gradient_transport', False)):
+    raise ValueError(
+      'noise-floor mode requires MAML use_gradient_transport: false')
+  return [maml_anchor]
+
+
 def make_loader(config, test_config, n_tasks, seed, device):
   dataset = datasets.make(config['dataset'], **test_config)
   if dataset.domains != [config['domain']]:
@@ -285,6 +304,57 @@ def move_batch_to_device(data, device):
     tensor.to(device, non_blocking=non_blocking) for tensor in data)
 
 
+def split_noise_floor_query_batch(batch, n_way, n_query, split_query=15):
+  x_shot, x_query, y_shot, y_query = batch
+  if n_query != split_query * 2:
+    raise ValueError(
+      'query split requires n_query={}, got {}'.format(
+        split_query * 2, n_query))
+
+  query_a = []
+  labels_a = []
+  query_b = []
+  labels_b = []
+  for episode in range(x_query.size(0)):
+    episode_query_a = []
+    episode_labels_a = []
+    episode_query_b = []
+    episode_labels_b = []
+    for cls in range(n_way):
+      class_indices = (y_query[episode] == cls).nonzero(
+        as_tuple=False).flatten()
+      if class_indices.numel() != n_query:
+        raise ValueError(
+          'expected {} query examples for class {}, got {}'.format(
+            n_query, cls, class_indices.numel()))
+
+      indices_a = class_indices[:split_query]
+      indices_b = class_indices[split_query:]
+      episode_query_a.append(x_query[episode, indices_a])
+      episode_labels_a.append(y_query[episode, indices_a])
+      episode_query_b.append(x_query[episode, indices_b])
+      episode_labels_b.append(y_query[episode, indices_b])
+
+    query_a.append(torch.cat(episode_query_a, dim=0))
+    labels_a.append(torch.cat(episode_labels_a, dim=0))
+    query_b.append(torch.cat(episode_query_b, dim=0))
+    labels_b.append(torch.cat(episode_labels_b, dim=0))
+
+  batch_a = (
+    x_shot,
+    torch.stack(query_a, dim=0),
+    y_shot,
+    torch.stack(labels_a, dim=0),
+  )
+  batch_b = (
+    x_shot,
+    torch.stack(query_b, dim=0),
+    y_shot,
+    torch.stack(labels_b, dim=0),
+  )
+  return batch_a, batch_b
+
+
 def evaluate_anchor(
         anchor,
         batch,
@@ -361,6 +431,39 @@ def make_task_rows(domain, losses, accuracies):
   return rows
 
 
+def choose_noise_floor_winner(
+        value_a,
+        value_b,
+        higher_is_better,
+        tolerance=1e-12):
+  if np.isclose(value_a, value_b, rtol=0.0, atol=tolerance):
+    return 'tie'
+  if higher_is_better:
+    return 'maml_a' if value_a > value_b else 'maml_b'
+  return 'maml_a' if value_a < value_b else 'maml_b'
+
+
+def make_noise_floor_rows(domain, losses, accuracies):
+  rows = []
+  for task_id, values in enumerate(zip(
+          losses['maml_a'], accuracies['maml_a'],
+          losses['maml_b'], accuracies['maml_b'])):
+    loss_a, accuracy_a, loss_b, accuracy_b = values
+    rows.append({
+      'task_id': task_id,
+      'domain': domain,
+      'maml_a_query_loss': float(loss_a),
+      'maml_a_query_accuracy': float(accuracy_a),
+      'maml_b_query_loss': float(loss_b),
+      'maml_b_query_accuracy': float(accuracy_b),
+      'loss_winner': choose_noise_floor_winner(
+        loss_a, loss_b, higher_is_better=False),
+      'accuracy_winner': choose_noise_floor_winner(
+        accuracy_a, accuracy_b, higher_is_better=True),
+    })
+  return rows
+
+
 def compute_rates(rows, winner_key):
   total = len(rows)
   counts = {
@@ -370,6 +473,19 @@ def compute_rates(rows, winner_key):
   return {
     'maml_win_rate': float(counts['maml'] / total),
     'gt_win_rate': float(counts['gt'] / total),
+    'tie_rate': float(counts['tie'] / total),
+  }
+
+
+def compute_noise_floor_rates(rows, winner_key):
+  total = len(rows)
+  counts = {
+    name: sum(row[winner_key] == name for row in rows)
+    for name in ('maml_a', 'maml_b', 'tie')
+  }
+  return {
+    'maml_a_win_rate': float(counts['maml_a'] / total),
+    'maml_b_win_rate': float(counts['maml_b'] / total),
     'tie_rate': float(counts['tie'] / total),
   }
 
@@ -439,6 +555,78 @@ def compute_summary(config, anchors, rows, losses, accuracies, outputs, seed):
   }
 
 
+def compute_noise_floor_summary(
+        config,
+        anchor,
+        rows,
+        losses,
+        accuracies,
+        outputs,
+        seed):
+  losses_a = np.asarray(losses['maml_a'], dtype=np.float64)
+  losses_b = np.asarray(losses['maml_b'], dtype=np.float64)
+  mean_loss_a = float(np.mean(losses_a))
+  mean_loss_b = float(np.mean(losses_b))
+  best_single = 'maml_a' if mean_loss_a <= mean_loss_b else 'maml_b'
+  best_single_loss = min(mean_loss_a, mean_loss_b)
+  oracle_loss = float(np.mean(np.minimum(losses_a, losses_b)))
+  absolute_gain = float(best_single_loss - oracle_loss)
+  relative_gain = (
+    float(absolute_gain / best_single_loss * 100.0)
+    if best_single_loss != 0.0 else None)
+
+  if np.ptp(losses_a) == 0.0 or np.ptp(losses_b) == 0.0:
+    correlation = None
+  else:
+    correlation = stats.spearmanr(losses_a, losses_b).correlation
+    if correlation is None or not np.isfinite(correlation):
+      correlation = None
+    else:
+      correlation = float(correlation)
+
+  return {
+    'mode': 'query_split_noise_floor',
+    'dataset': config['dataset'],
+    'domain': config['domain'],
+    'seed': seed,
+    'n_tasks': len(rows),
+    'protocol': {
+      'n_way': config['test']['n_way'],
+      'n_shot': config['test']['n_shot'],
+      'n_query_total_per_class': config['test']['n_query'],
+      'n_query_per_split_per_class': 15,
+      'n_step': config['inner_args']['n_step'],
+      'encoder_lr': config['inner_args']['encoder_lr'],
+      'classifier_lr': config['inner_args']['classifier_lr'],
+      'frozen': config['inner_args']['frozen'],
+      'normalization': config['test']['normalization'],
+      'transform': config['test']['transform'],
+    },
+    'maml': {
+      'load': anchor['load'],
+      'use_gradient_transport': anchor['use_gradient_transport'],
+    },
+    'maml_a': {
+      'mean_query_loss': mean_loss_a,
+      'mean_query_accuracy': float(np.mean(accuracies['maml_a'])),
+    },
+    'maml_b': {
+      'mean_query_loss': mean_loss_b,
+      'mean_query_accuracy': float(np.mean(accuracies['maml_b'])),
+    },
+    'loss_comparison': compute_noise_floor_rates(rows, 'loss_winner'),
+    'accuracy_comparison': compute_noise_floor_rates(
+      rows, 'accuracy_winner'),
+    'loss_spearman': correlation,
+    'best_single_split': best_single,
+    'best_single_loss': float(best_single_loss),
+    'oracle_loss': oracle_loss,
+    'absolute_gain': absolute_gain,
+    'relative_gain_percent': relative_gain,
+    'outputs': outputs,
+  }
+
+
 def write_task_csv(path, rows):
   fieldnames = [
     'task_id',
@@ -447,6 +635,23 @@ def write_task_csv(path, rows):
     'maml_query_accuracy',
     'gt_query_loss',
     'gt_query_accuracy',
+    'loss_winner',
+    'accuracy_winner',
+  ]
+  with open(path, 'w', newline='', encoding='utf-8') as f:
+    writer = csv.DictWriter(f, fieldnames=fieldnames)
+    writer.writeheader()
+    writer.writerows(rows)
+
+
+def write_noise_floor_csv(path, rows):
+  fieldnames = [
+    'task_id',
+    'domain',
+    'maml_a_query_loss',
+    'maml_a_query_accuracy',
+    'maml_b_query_loss',
+    'maml_b_query_accuracy',
     'loss_winner',
     'accuracy_winner',
   ]
@@ -489,6 +694,153 @@ def log_summary(summary):
     summary['absolute_gain'],
     ('{:.4f}%'.format(summary['relative_gain_percent'])
      if summary['relative_gain_percent'] is not None else None)))
+
+
+def log_noise_floor_summary(summary):
+  utils.log('evaluated {} query-split noise-floor tasks on {}'.format(
+    summary['n_tasks'], summary['domain']))
+  utils.log('MAML_A: mean loss={:.6f}, mean accuracy={:.6f}'.format(
+    summary['maml_a']['mean_query_loss'],
+    summary['maml_a']['mean_query_accuracy']))
+  utils.log('MAML_B: mean loss={:.6f}, mean accuracy={:.6f}'.format(
+    summary['maml_b']['mean_query_loss'],
+    summary['maml_b']['mean_query_accuracy']))
+
+  loss_rates = summary['loss_comparison']
+  accuracy_rates = summary['accuracy_comparison']
+  utils.log('loss wins: MAML_A={:.2%}, MAML_B={:.2%}, ties={:.2%}'.format(
+    loss_rates['maml_a_win_rate'],
+    loss_rates['maml_b_win_rate'],
+    loss_rates['tie_rate']))
+  utils.log(
+    'accuracy wins: MAML_A={:.2%}, MAML_B={:.2%}, ties={:.2%}'.format(
+      accuracy_rates['maml_a_win_rate'],
+      accuracy_rates['maml_b_win_rate'],
+      accuracy_rates['tie_rate']))
+  utils.log('MAML_A-MAML_B loss Spearman: {}'.format(
+    summary['loss_spearman']))
+  utils.log('best single split: {}, loss={:.6f}'.format(
+    summary['best_single_split'], summary['best_single_loss']))
+  utils.log('oracle loss={:.6f}, absolute gain={:.6f}, relative gain={}'.format(
+    summary['oracle_loss'],
+    summary['absolute_gain'],
+    ('{:.4f}%'.format(summary['relative_gain_percent'])
+     if summary['relative_gain_percent'] is not None else None)))
+
+
+def validate_noise_floor_protocol(config, test_config, inner_args):
+  if config.get('dataset') != 'meta-album':
+    raise ValueError('noise-floor mode requires dataset: meta-album')
+
+  expected_test = {
+    'n_way': 5,
+    'n_shot': 1,
+    'n_query': 30,
+    'normalization': False,
+    'transform': None,
+  }
+  for key, expected in expected_test.items():
+    if test_config.get(key) != expected:
+      raise ValueError(
+        'noise-floor test.{} must be {!r}, got {!r}'.format(
+          key, expected, test_config.get(key)))
+
+  expected_inner = {
+    'reset_classifier': False,
+    'n_step': 10,
+    'encoder_lr': 0.01,
+    'classifier_lr': 0.01,
+  }
+  for key, expected in expected_inner.items():
+    if inner_args.get(key) != expected:
+      raise ValueError(
+        'noise-floor inner_args.{} must be {!r}, got {!r}'.format(
+          key, expected, inner_args.get(key)))
+  if 'bn' not in inner_args.get('frozen', []):
+    raise ValueError("noise-floor inner_args.frozen must include 'bn'")
+
+
+def noise_floor_main(config, args):
+  if args.domain is None:
+    raise ValueError('--noise-floor requires --domain')
+
+  config = dict(config)
+  seed = int(args.seed if args.seed is not None else config.get('seed', 0))
+  seed_everything(seed)
+  device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+  domain = resolve_domain(config, args.domain)
+  n_tasks = resolve_n_tasks(config, args.n_tasks)
+
+  config['domain'] = domain
+  test_config = prepare_test_config(config, domain, n_tasks)
+  test_config['n_query'] = 30
+  config['test'] = test_config
+  inner_args = utils.config_inner_args(dict(config.get('inner_args') or {}))
+  config['inner_args'] = inner_args
+  validate_noise_floor_protocol(config, test_config, inner_args)
+
+  anchor_configs = validate_noise_floor_anchor(
+    apply_anchor_overrides(config, args))
+  loader = make_loader(config, test_config, n_tasks, seed, device)
+  anchors, inner_args = load_anchor_models(
+    config, args, device, anchor_configs)
+  anchor = anchors[0]
+  if anchor['use_gradient_transport']:
+    raise ValueError('gradient transport must be disabled in noise-floor mode')
+
+  use_amp = bool(config.get('use_amp', False))
+  keep_on_gpu = device.type == 'cuda'
+  if keep_on_gpu:
+    anchor['model'].to(device)
+
+  losses = {'maml_a': [], 'maml_b': []}
+  accuracies = {'maml_a': [], 'maml_b': []}
+  desc = 'query-split noise-floor {}'.format(config['domain'])
+  for data in tqdm(loader, desc=desc, leave=False):
+    batch = move_batch_to_device(data, device)
+    batch_a, batch_b = split_noise_floor_query_batch(
+      batch,
+      test_config['n_way'],
+      test_config['n_query'])
+
+    losses_a, accuracies_a = evaluate_anchor(
+      anchor,
+      batch_a,
+      inner_args,
+      test_config['n_way'],
+      device,
+      use_amp,
+      keep_on_gpu=keep_on_gpu)
+    losses_b, accuracies_b = evaluate_anchor(
+      anchor,
+      batch_b,
+      inner_args,
+      test_config['n_way'],
+      device,
+      use_amp,
+      keep_on_gpu=keep_on_gpu)
+    losses['maml_a'].extend(losses_a)
+    losses['maml_b'].extend(losses_b)
+    accuracies['maml_a'].extend(accuracies_a)
+    accuracies['maml_b'].extend(accuracies_b)
+
+  rows = make_noise_floor_rows(config['domain'], losses, accuracies)
+  output_dir = args.output_dir or config.get('output_dir') or '.'
+  os.makedirs(output_dir, exist_ok=True)
+  domain_slug = config['domain'].lower()
+  outputs = {
+    'tasks_csv': os.path.abspath(os.path.join(
+      output_dir, 'noise_floor_{}.csv'.format(domain_slug))),
+    'summary_json': os.path.abspath(os.path.join(
+      output_dir, 'noise_floor_summary_{}.json'.format(domain_slug))),
+  }
+  summary = compute_noise_floor_summary(
+    config, anchor, rows, losses, accuracies, outputs, seed)
+  write_noise_floor_csv(outputs['tasks_csv'], rows)
+  write_summary_json(outputs['summary_json'], summary)
+  log_noise_floor_summary(summary)
+  utils.log('task CSV: {}'.format(outputs['tasks_csv']))
+  utils.log('summary JSON: {}'.format(outputs['summary_json']))
 
 
 def main(config, args):
@@ -553,6 +905,8 @@ if __name__ == '__main__':
                       help='analysis configuration file')
   parser.add_argument('--domain', choices=SUPPORTED_DOMAINS,
                       help='single Meta-Album domain to analyze')
+  parser.add_argument('--noise-floor', action='store_true',
+                      help='run MAML query-split noise-floor analysis')
   parser.add_argument('--n-tasks', type=int, default=None,
                       help='number of episodic tasks (default: config or 1000)')
   parser.add_argument('--seed', type=int, default=None,
@@ -589,4 +943,7 @@ if __name__ == '__main__':
     config['_gpu'] = args.gpu
 
   utils.set_gpu(args.gpu)
-  main(config, args)
+  if args.noise_floor:
+    noise_floor_main(config, args)
+  else:
+    main(config, args)
