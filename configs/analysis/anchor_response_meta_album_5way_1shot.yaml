@@ -1,0 +1,39 @@
+dataset: meta-album
+data_root: ./materials/album
+output_dir: ./save/anchor_response_meta_album_5way_1shot
+domain: PLK
+seed: 0
+n_tasks: 1000
+num_workers: 0
+
+test:
+  split: meta-test
+  domains: [PLK]
+  image_size: 84
+  normalization: False
+  transform: null
+  n_batch: 250
+  n_episode: 4
+  n_way: 5
+  n_shot: 1
+  n_query: 15
+
+inner_args:
+  reset_classifier: False
+  n_step: 10
+  encoder_lr: 0.01
+  classifier_lr: 0.01
+  first_order: False
+  frozen:
+    - bn
+
+use_amp: false
+
+anchors:
+  - name: maml
+    load: null
+    use_gradient_transport: false
+
+  - name: gradient_transport
+    load: null
+    use_gradient_transport: true
