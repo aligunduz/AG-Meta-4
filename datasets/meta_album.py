@@ -1,3 +1,4 @@
+import json
 import os
 import pickle
 
@@ -8,6 +9,77 @@ from PIL import Image
 
 from .datasets import register
 from .transforms import get_transform
+
+
+_MANIFEST_SPLITS = ('train', 'val', 'test')
+_SPLIT_TO_MANIFEST_KEY = {
+  'meta-train': 'train',
+  'meta-val': 'val',
+  'meta-test': 'test',
+}
+
+
+def _preview_classes(classes, limit=10):
+  classes = sorted(classes)
+  preview = ', '.join(classes[:limit])
+  if len(classes) > limit:
+    preview += ', ... ({} total)'.format(len(classes))
+  return preview
+
+
+def _load_class_split_manifest(manifest_path, domains):
+  if not os.path.isfile(manifest_path):
+    raise FileNotFoundError(
+      'Meta-Album class split manifest not found: {}'.format(manifest_path))
+
+  try:
+    with open(manifest_path, 'r', encoding='utf-8') as f:
+      manifest = json.load(f)
+  except json.JSONDecodeError as exc:
+    raise ValueError(
+      'Invalid Meta-Album class split manifest JSON at {}: {}'.format(
+        manifest_path, exc)) from exc
+
+  if not isinstance(manifest, dict):
+    raise ValueError(
+      'Meta-Album class split manifest must contain a JSON object: {}'.format(
+        manifest_path))
+  domain_splits = {}
+  for domain in domains:
+    if domain not in manifest:
+      raise KeyError(
+        "Meta-Album dataset key '{}' is missing from class split manifest {}"
+        .format(domain, manifest_path))
+    entry = manifest[domain]
+
+    if not isinstance(entry, dict):
+      raise ValueError(
+        "Meta-Album manifest entry for dataset '{}' must be an object: {}"
+        .format(domain, manifest_path))
+
+    normalized = {}
+    for split in _MANIFEST_SPLITS:
+      if split not in entry or not isinstance(entry[split], list):
+        raise ValueError(
+          "Meta-Album manifest dataset '{}' split '{}' must be a JSON array "
+          'in {}'.format(domain, split, manifest_path))
+      names = [str(value) for value in entry[split]]
+      if len(names) != len(set(names)):
+        raise ValueError(
+          "Meta-Album manifest dataset '{}' split '{}' contains duplicate "
+          'classes'.format(domain, split))
+      normalized[split] = names
+
+    split_sets = {key: set(values) for key, values in normalized.items()}
+    for left, right in (('train', 'val'), ('train', 'test'), ('val', 'test')):
+      overlap = split_sets[left] & split_sets[right]
+      if overlap:
+        raise ValueError(
+          "Meta-Album manifest dataset '{}' has overlapping {}/{} classes: {}"
+          .format(domain, left, right, _preview_classes(overlap)))
+    domain_splits[domain] = normalized
+
+  return domain_splits
 
 
 def _load_domain(root_path, domain):
@@ -32,13 +104,12 @@ class MetaAlbumCrossDomain(Dataset):
   """
   Cross-domain episodic few-shot dataset over Meta-Album.
 
-  Unlike the single-dataset loaders (mini-imagenet, cub200, ...), the
-  meta-train / meta-val / meta-test split here is defined by *disjoint
-  Meta-Album domains* (e.g. meta-train on ['BRD', 'FLW', 'PLT_VIL'],
-  meta-test on entirely unseen domains ['PLK', 'RESISC']) rather than by
-  holding out classes within one domain. Each episode samples its n_way
-  classes from a single, randomly chosen domain so that a task never mixes
-  two unrelated domains.
+  By default, meta-train / meta-val / meta-test are defined by disjoint
+  Meta-Album datasets, preserving the original domain-holdout behavior.
+  When class_split_manifest is supplied, the same datasets may be used in
+  every phase and each dataset's class pool is filtered to the manifest's
+  train / val / test partition. Each episode still samples its n_way classes
+  from one randomly chosen dataset, so a task never mixes datasets.
 
   Expects root_path/<domain>.pickle for every domain listed in `domains`,
   produced by tools/pack_meta_album.py.
@@ -47,10 +118,16 @@ class MetaAlbumCrossDomain(Dataset):
     root_path (str): folder containing one <domain>.pickle per domain.
     domains (list of str): Meta-Album domain codes to draw episodes from
       for this split, e.g. ['BRD', 'FLW', 'PLT_VIL'].
+    class_split_manifest (str, optional): JSON file containing train, val and
+      test class lists for every configured dataset. If omitted, all classes
+      in each configured dataset are used, preserving the old behavior. The
+      canonical layout is {"BRD": {"train": [...], "val": [...],
+      "test": [...]}, ...}.
   """
   def __init__(self, root_path, split='train', domains=None, image_size=84,
                normalization=True, transform=None, val_transform=None,
-               n_batch=200, n_episode=4, n_way=5, n_shot=1, n_query=15):
+               n_batch=200, n_episode=4, n_way=5, n_shot=1, n_query=15,
+               class_split_manifest=None):
     super(MetaAlbumCrossDomain, self).__init__()
     assert domains, (
       "meta-album requires a 'domains' list in the config's '{}' block, "
@@ -65,6 +142,18 @@ class MetaAlbumCrossDomain(Dataset):
     self.n_way = n_way
     self.n_shot = n_shot
     self.n_query = n_query
+    self.class_split_manifest = class_split_manifest
+
+    manifest_split = None
+    manifest_domain_splits = None
+    if class_split_manifest is not None:
+      if split not in _SPLIT_TO_MANIFEST_KEY:
+        raise ValueError(
+          "Meta-Album class split manifest requires split to be one of {}, "
+          "got '{}'".format(sorted(_SPLIT_TO_MANIFEST_KEY), split))
+      manifest_split = _SPLIT_TO_MANIFEST_KEY[split]
+      manifest_domain_splits = _load_class_split_manifest(
+        class_split_manifest, self.domains)
 
     if normalization:
       self.norm_params = {'mean': [0.485, 0.456, 0.406],
@@ -89,15 +178,50 @@ class MetaAlbumCrossDomain(Dataset):
     self.n_classes = 0
     for domain in self.domains:
       data, labels = _load_domain(root_path, domain)
-      cat_keys = sorted(np.unique(labels))
-      assert len(cat_keys) >= n_way, (
-        "Meta-Album domain '{}' only has {} categories, need at least "
-        "n_way={} to sample an episode.".format(domain, len(cat_keys), n_way))
+      all_cat_keys = sorted(np.unique(labels))
+      cat_keys = all_cat_keys
+      if manifest_domain_splits is not None:
+        actual_by_name = {
+          str(class_name): class_name for class_name in all_cat_keys
+        }
+        if len(actual_by_name) != len(all_cat_keys):
+          raise ValueError(
+            "Meta-Album dataset '{}' contains class labels that collide after "
+            'string normalization'.format(domain))
+
+        domain_splits = manifest_domain_splits[domain]
+        manifest_classes = set().union(
+          *(set(domain_splits[key]) for key in _MANIFEST_SPLITS))
+        actual_classes = set(actual_by_name)
+        unknown = manifest_classes - actual_classes
+        unassigned = actual_classes - manifest_classes
+        if unknown:
+          raise ValueError(
+            "Meta-Album manifest dataset '{}' contains classes not found in "
+            'the pickle: {}'.format(domain, _preview_classes(unknown)))
+        if unassigned:
+          raise ValueError(
+            "Meta-Album manifest dataset '{}' does not assign these pickle "
+            'classes to train/val/test: {}'.format(
+              domain, _preview_classes(unassigned)))
+
+        cat_keys = [
+          actual_by_name[class_name]
+          for class_name in domain_splits[manifest_split]
+        ]
+
+      if len(cat_keys) < n_way:
+        raise ValueError(
+          "Meta-Album dataset '{}' split '{}' only has {} classes, need at "
+          'least n_way={} to sample an episode.'.format(
+            domain, split, len(cat_keys), n_way))
       catlocs = tuple(
         np.argwhere(labels == c).reshape(-1) for c in cat_keys)
       self.domain_data.append(data)
       self.domain_catlocs.append(catlocs)
       self.n_classes += len(cat_keys)
+      print('{} | split={} | kullanılan sınıf={} | toplam sınıf={}'.format(
+        domain, split, len(cat_keys), len(all_cat_keys)))
 
   def __len__(self):
     return self.n_batch * self.n_episode

@@ -1,7 +1,9 @@
 dataset: meta-album
 test:
+  root_path: materials/album
   split: meta-test
-  domains: [PLK, RESISC]
+  domains: [BRD, DOG, AWA, FLW, FNG, PLT_NET, SPT, ACT_40, ACT_410]
+  class_split_manifest: materials/album/natural_cluster_class_split.json
   image_size: 84
   normalization: False
   transform: null
@@ -9,9 +11,9 @@ test:
   n_episode: 4
   n_way: 5
   n_shot: 1
-  n_query: 1
+  n_query: 15
 
-load: ./save/convnet4_album_5_way_1_shot/max-va.pth
+load: ./save/convnet4_album_natural_cluster_maml_5_way_1_shot/max-va.pth
 
 inner_args:
   n_step: 10
@@ -21,6 +23,6 @@ inner_args:
   frozen:
     - bn
 
-use_gradient_transport: true
+use_gradient_transport: false
 use_amp: true
 epoch: 10
