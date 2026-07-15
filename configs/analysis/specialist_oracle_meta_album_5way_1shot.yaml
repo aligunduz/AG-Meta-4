@@ -1,0 +1,72 @@
+dataset: meta-album
+data_root: ./materials/album
+class_split_manifest: ./materials/album/natural_and_technical_cluster_class_split.json
+output_dir: ./save/specialist_oracle_meta_album_5way_1shot
+
+seed: 0
+tasks_per_cluster: 500
+num_workers: 0
+use_amp: false
+keep_models_on_gpu: true
+
+bootstrap:
+  n_resamples: 10000
+  confidence: 0.95
+  seed: 1729
+
+clusters:
+  NATURAL:
+    - BRD
+    - DOG
+    - AWA
+    - FLW
+    - FNG
+    - PLT_NET
+    - SPT
+    - ACT_40
+    - ACT_410
+  TECHNICAL:
+    - RESISC
+    - RSICB
+    - RSD
+    - TEX
+    - TEX_ALOT
+    - TEX_DTD
+
+test:
+  root_path: ./materials/album
+  split: meta-test
+  class_split_manifest: ./materials/album/natural_and_technical_cluster_class_split.json
+  image_size: 84
+  normalization: false
+  transform: null
+  n_batch: 250
+  n_episode: 4
+  n_way: 5
+  n_shot: 1
+  n_query: 15
+
+query_split:
+  enabled: true
+  n_query: 30
+  split_query: 15
+
+inner_args:
+  reset_classifier: false
+  n_step: 10
+  encoder_lr: 0.01
+  classifier_lr: 0.01
+  first_order: false
+  frozen:
+    - bn
+
+models:
+  NATURAL:
+    load: ./save/MAML_conv4net_NATURAL_Domain_Ozel/max-va.pth
+    use_gradient_transport: false
+  TECHNICAL:
+    load: ./save/MAML_conv4net_TECHNICAL_DOMAIN_Ozel/max-va.pth
+    use_gradient_transport: false
+  UNION:
+    load: ./save/MAML_conv4net_NATURAL_and_TECHNICAL_DOMAIN_Ozel/max-va.pth
+    use_gradient_transport: false
