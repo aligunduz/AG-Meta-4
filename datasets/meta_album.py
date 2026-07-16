@@ -123,11 +123,16 @@ class MetaAlbumCrossDomain(Dataset):
       in each configured dataset are used, preserving the old behavior. The
       canonical layout is {"BRD": {"train": [...], "val": [...],
       "test": [...]}, ...}.
+    domain_groups (list of lists, optional): groups of configured domains used
+      for group-balanced episode sampling. When supplied, an episode first
+      samples one group uniformly and then one domain uniformly inside that
+      group. Every configured domain must appear exactly once. If omitted,
+      domains are sampled uniformly as before.
   """
   def __init__(self, root_path, split='train', domains=None, image_size=84,
                normalization=True, transform=None, val_transform=None,
                n_batch=200, n_episode=4, n_way=5, n_shot=1, n_query=15,
-               class_split_manifest=None):
+               class_split_manifest=None, domain_groups=None):
     super(MetaAlbumCrossDomain, self).__init__()
     assert domains, (
       "meta-album requires a 'domains' list in the config's '{}' block, "
@@ -143,6 +148,51 @@ class MetaAlbumCrossDomain(Dataset):
     self.n_shot = n_shot
     self.n_query = n_query
     self.class_split_manifest = class_split_manifest
+    self.domain_groups = None
+    self.domain_group_indices = None
+
+    if domain_groups is not None:
+      if not isinstance(domain_groups, (list, tuple)) or not domain_groups:
+        raise ValueError(
+          'meta-album domain_groups must be a non-empty list of groups')
+
+      normalized_groups = []
+      grouped_domains = []
+      for group_index, group in enumerate(domain_groups):
+        if not isinstance(group, (list, tuple)) or not group:
+          raise ValueError(
+            'meta-album domain_groups[{}] must be a non-empty list'.format(
+              group_index))
+        normalized_group = [str(domain) for domain in group]
+        if len(normalized_group) != len(set(normalized_group)):
+          raise ValueError(
+            'meta-album domain_groups[{}] contains duplicate domains'.format(
+              group_index))
+        normalized_groups.append(normalized_group)
+        grouped_domains.extend(normalized_group)
+
+      if len(grouped_domains) != len(set(grouped_domains)):
+        raise ValueError(
+          'meta-album domain_groups contains a domain in multiple groups')
+
+      configured_domains = set(self.domains)
+      grouped_domain_set = set(grouped_domains)
+      missing = configured_domains - grouped_domain_set
+      unknown = grouped_domain_set - configured_domains
+      if missing or unknown:
+        raise ValueError(
+          'meta-album domain_groups must contain every configured domain '
+          'exactly once; missing={}, unknown={}'.format(
+            sorted(missing), sorted(unknown)))
+
+      domain_to_index = {
+        domain: index for index, domain in enumerate(self.domains)
+      }
+      self.domain_groups = normalized_groups
+      self.domain_group_indices = [
+        tuple(domain_to_index[domain] for domain in group)
+        for group in normalized_groups
+      ]
 
     manifest_split = None
     manifest_domain_splits = None
@@ -223,11 +273,27 @@ class MetaAlbumCrossDomain(Dataset):
       print('{} | split={} | kullanılan sınıf={} | toplam sınıf={}'.format(
         domain, split, len(cat_keys), len(all_cat_keys)))
 
+    if self.domain_group_indices is None:
+      print('Meta-Album domain sampling: domain-uniform')
+    else:
+      print(
+        'Meta-Album domain sampling: group-uniform | groups={}'.format(
+          self.domain_groups))
+
   def __len__(self):
     return self.n_batch * self.n_episode
 
+  def _sample_domain_idx(self):
+    if self.domain_group_indices is None:
+      return int(np.random.randint(len(self.domains)))
+
+    group_idx = int(np.random.randint(len(self.domain_group_indices)))
+    group = self.domain_group_indices[group_idx]
+    within_group_idx = int(np.random.randint(len(group)))
+    return group[within_group_idx]
+
   def __getitem__(self, index):
-    domain_idx = np.random.randint(len(self.domains))
+    domain_idx = self._sample_domain_idx()
     data = self.domain_data[domain_idx]
     catlocs = self.domain_catlocs[domain_idx]
     cats = np.random.choice(len(catlocs), self.n_way, replace=False)
